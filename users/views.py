@@ -1,3 +1,5 @@
+import os
+import requests
 from django.db import models
 from django.views import View
 from django.views.generic import FormView
@@ -47,7 +49,6 @@ class SignUpView(FormView):
 
 
 def complete_verification(request, key):
-    print(key)
     try:
         user = models.User.objects.get(email_secret=key)
         user.email_verified = True
@@ -58,3 +59,69 @@ def complete_verification(request, key):
         # TODO add error message
         pass
     return redirect(reverse("core:home"))
+
+
+def github_login(request):
+    client_id = os.environ.get("GH_ID")
+    redirect_uri = "http://127.0.0.1:8080/users/login/github/callback"
+    return redirect(
+        f"https://github.com/login/oauth/authorize?client_id={client_id}&redirect_uri={redirect_uri}&scope=read:user"
+    )
+
+
+class GithubException(Exception):
+    pass
+
+
+def github_callback(request):
+    try:
+        client_id = os.environ.get("GH_ID")
+        client_secret = os.environ.get("GH_SECRET")
+        code = request.GET.get("code", None)
+        if code is not None:
+            response = requests.post(
+                f"https://github.com/login/oauth/access_token?client_id={client_id}&client_secret={client_secret}&code={code}",
+                headers={"Accept": "application/json"},
+            )
+            result_json = response.json()
+            error = result_json.get("error", None)
+            if error is not None:
+                raise GithubException()
+            else:
+                access_token = result_json.get("access_token")
+                response_user = requests.get(
+                    "https://api.github.com/user",
+                    headers={
+                        "Accept": "application/json",
+                        "Authorization": f"token {access_token}",
+                    },
+                )
+                response_user_json = response_user.json()
+                username = response_user_json.get("login", None)
+                if username is not None:
+                    name = response_user_json.get("name")
+                    email = response_user_json.get("email")
+                    bio = response_user_json.get("bio")
+                    try:
+                        user = models.User.objects.get(email=email)
+                        if user.login_method != models.User.LOGIN_GITHUB:
+                            raise GithubException()
+                    except models.User.DoesNotExist:
+                        user = models.User.objects.create(
+                            username=email,
+                            first_name=name,
+                            bio=bio,
+                            email=email,
+                            login_method=models.User.LOGIN_GITHUB,
+                        )
+                        user.set_unusable_password()
+                        user.save()
+                        login(request, user)
+                    return redirect(reverse("core:home"))
+                else:
+                    raise GithubException()
+        else:
+            raise GithubException()
+    except GithubException:
+        # send error message
+        return redirect(reverse("users:login"))
